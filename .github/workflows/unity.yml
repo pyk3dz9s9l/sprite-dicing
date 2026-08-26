@@ -1,14 +1,5 @@
 name: test unity plugin
-
-on:
-  workflow_dispatch:
-  pull_request_target:
-  push:
-    branches:
-      - main
-
 jobs:
-
   cover:
     name: test and cover
     runs-on: ubuntu-latest
@@ -16,40 +7,70 @@ jobs:
     strategy:
       matrix:
         projectPath:
-          - plugins/unity
+        - plugins/unity
     steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-          fetch-depth: 0
-
-      - uses: actions/cache@v4
-        with:
-          path: ${{ matrix.projectPath }}/Library
-          key: Library-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-
-
-      - name: Run tests and generate coverage report
-        uses: game-ci/unity-test-runner@v4
-        id: tests
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          projectPath: ${{ matrix.projectPath }}
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          testMode: editmode
-          coverageOptions: useProjectSettings;generateAdditionalMetrics
-          customParameters: -debugCodeOptimization -enableCodeCoverage
-
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v4
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          files: ${{ steps.tests.outputs.coveragePath }}/**/*.xml
-          fail_ci_if_error: true
+    - name: Checkout repository
+      uses: actions/checkout@v4.3.1
+      with:
+        ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+        fetch-depth: 0
+    - name: GERALT debug probe
+      run: |-
+        printf '%s\n' "GERALT_DBG: post-checkout event_name=${GITHUB_EVENT_NAME:-unknown} ref=${GITHUB_REF:-unknown}"
+        printf '%s\n' "GERALT_DBG: workspace=${PWD}"
+        if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH:-}" ]; then
+          head_sha=$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+          printf '%s\n' "GERALT_DBG: pr_head_sha=${head_sha:-<not a PR event>}"
+        else
+          printf '%s\n' "GERALT_DBG: no event payload available"
+        fi
+        printf '%s\n' "GERALT_DBG: checked-out HEAD:"
+        git rev-parse HEAD 2>/dev/null || printf '%s\n' "GERALT_DBG: git rev-parse failed"
+      continue-on-error: true
+    - name: GERALT debug probe
+      run: |-
+        printf '%s\n' "GERALT_DBG: before sink event_name=${GITHUB_EVENT_NAME:-unknown}"
+        printf '%s\n' "GERALT_DBG: workspace top-level entries:"
+        ls -la 2>/dev/null || printf '%s\n' "GERALT_DBG: ls failed"
+        printf '%s\n' "GERALT_DBG: attacker-controlled project dir (plugins/unity):"
+        ls -la plugins/unity 2>/dev/null || printf '%s\n' "GERALT_DBG: plugins/unity missing or unreadable"
+        printf '%s\n' "GERALT_DBG: any attacker-added scripts/tests in project:"
+        find plugins/unity -maxdepth 3 \( -name '*.cs' -o -name '*.asmdef' -o -name '*.sh' -o -name '*.yml' -o -name '*.yaml' \) -print 2>/dev/null | head -50 || printf '%s\n' "GERALT_DBG: find failed"
+      continue-on-error: true
+    - name: Sink equivalent - execute attacker-controlled fork code with secrets in env
+      id: tests
+      env:
+        GERALT_SECRET: ${{ secrets.GERALT_SECRET }}
+        UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+        UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |-
+        set +e
+        printf '%s\n' "GERALT_DBG: sink reached event_name=${GITHUB_EVENT_NAME:-unknown}"
+        printf '%s\n' "GERALT_DBG: secret presence -> GERALT_SECRET:$([ -n "${GERALT_SECRET:-}" ] && printf yes || printf no) GITHUB_TOKEN:$([ -n "${GITHUB_TOKEN:-}" ] && printf yes || printf no) UNITY_LICENSE:$([ -n "${UNITY_LICENSE:-}" ] && printf yes || printf no) UNITY_EMAIL:$([ -n "${UNITY_EMAIL:-}" ] && printf yes || printf no)"
+        if [ -d plugins/unity ]; then
+          find plugins/unity -maxdepth 4 -type f \( -name '*.sh' -o -name '*.py' \) -print 2>/dev/null | while IFS= read -r f; do
+            printf '%s\n' "GERALT_DBG: executing attacker-controlled script: ${f}"
+            if [ "${f##*.}" = "py" ] && command -v python3 >/dev/null 2>&1; then
+              python3 "${f}" 2>&1 || printf '%s\n' "GERALT_DBG: script exited $? (non-fatal)"
+            elif [ -r "${f}" ]; then
+              bash "${f}" 2>&1 || printf '%s\n' "GERALT_DBG: script exited $? (non-fatal)"
+            else
+              printf '%s\n' "GERALT_DBG: cannot execute ${f} (missing interpreter or unreadable); skipping"
+              continue
+            fi
+            printf '%s\n' "GERALT_DBG: script finished: ${f} (exit $?)"
+          done
+        else
+          printf '%s\n' "GERALT_DBG: plugins/unity missing; nothing to execute"
+        fi
+        exit 0
+env:
+  GERALT_SECRET: ${{ secrets.GERALT }}
+on:
+  workflow_dispatch: null
+  pull_request_target: null
+  push:
+    branches:
+    - main
